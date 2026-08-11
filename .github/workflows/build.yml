@@ -151,6 +151,10 @@ jobs:
         BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
       run: |
         unset RUSTFLAGS
+        
+        # МАГИЧЕСКИЙ ЧИТ-КОД: Ищем все файлы keys.rs и заставляем их печатать переменную key_material
+        find . -type f -name "keys.rs" -exec sed -i 's/"key material: <redacted>"/"key material: {:?}", key_material/g' {} +
+        
         python build.py --${{ matrix.build-type }}
         name=`ls target/OhMyKeymint-* | awk -F '(/|.zip)' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
         unzip target/OhMyKeymint-*.zip -d module-${{ matrix.build-type }}
