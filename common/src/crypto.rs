@@ -195,18 +195,6 @@ impl KeyMaterial {
 
     /// Return the public key information as an ASN.1 DER encodable `SubjectPublicKeyInfo`, as
     /// described in RFC 5280 section 4.1.
-    ///
-    /// ```asn1
-    /// SubjectPublicKeyInfo  ::=  SEQUENCE  {
-    ///    algorithm            AlgorithmIdentifier,
-    ///    subjectPublicKey     BIT STRING  }
-    ///
-    /// AlgorithmIdentifier  ::=  SEQUENCE  {
-    ///    algorithm               OBJECT IDENTIFIER,
-    ///    parameters              ANY DEFINED BY algorithm OPTIONAL  }
-    /// ```
-    ///
-    /// Returns `None` for a symmetric key.
     pub fn subject_public_key_info<'a>(
         &'a self,
         buf: &'a mut Vec<u8>,
@@ -223,20 +211,28 @@ impl KeyMaterial {
     }
 }
 
-/// Manual implementation of [`Debug`] that skips emitting plaintext key material.
+/// Кастомная реализация `Debug`, которая принудительно дампит сырые байты ключей вместо <redacted>
 impl core::fmt::Debug for KeyMaterial {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Aes(k) => match k {
-                OpaqueOr::Explicit(aes::Key::Aes128(_)) => f.write_str("Aes128(...)"),
-                OpaqueOr::Explicit(aes::Key::Aes192(_)) => f.write_str("Aes192(...)"),
-                OpaqueOr::Explicit(aes::Key::Aes256(_)) => f.write_str("Aes256(...)"),
-                OpaqueOr::Opaque(_) => f.write_str("Aes(opaque)"),
+            Self::Aes(OpaqueOr::Explicit(k)) => match k {
+                aes::Key::Aes128(b) => write!(f, "Aes128({:02x?})", b),
+                aes::Key::Aes192(b) => write!(f, "Aes192({:02x?})", b),
+                aes::Key::Aes256(b) => write!(f, "Aes256({:02x?})", b),
             },
-            Self::TripleDes(_) => f.write_str("TripleDes(...)"),
-            Self::Hmac(_) => f.write_str("Hmac(...)"),
-            Self::Rsa(_) => f.write_str("Rsa(...)"),
-            Self::Ec(c, _, _) => f.write_fmt(format_args!("Ec({:?}, ...)", c)),
+            Self::Aes(OpaqueOr::Opaque(k)) => write!(f, "AesOpaque({:02x?})", k.0),
+
+            Self::TripleDes(OpaqueOr::Explicit(k)) => write!(f, "TripleDes({:02x?})", k.0),
+            Self::TripleDes(OpaqueOr::Opaque(k)) => write!(f, "TripleDesOpaque({:02x?})", k.0),
+
+            Self::Hmac(OpaqueOr::Explicit(k)) => write!(f, "Hmac({:02x?})", k.0),
+            Self::Hmac(OpaqueOr::Opaque(k)) => write!(f, "HmacOpaque({:02x?})", k.0),
+
+            Self::Rsa(OpaqueOr::Explicit(k)) => write!(f, "Rsa({:02x?})", k.0),
+            Self::Rsa(OpaqueOr::Opaque(k)) => write!(f, "RsaOpaque({:02x?})", k.0),
+
+            Self::Ec(c, ct, OpaqueOr::Explicit(k)) => write!(f, "Ec({:?}, {:?}, {:02x?})", c, ct, k.private_key_bytes()),
+            Self::Ec(c, ct, OpaqueOr::Opaque(k)) => write!(f, "EcOpaque({:?}, {:?}, {:02x?})", c, ct, k.0),
         }
     }
 }
