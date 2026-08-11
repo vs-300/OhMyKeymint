@@ -1,0 +1,49 @@
+name: Build OhMyKeymint
+
+# Запускать сборку при каждом push в ветку master/main или вручную
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Скачиваем твой код из репозитория
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Устанавливаем язык Rust и цель для Android
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      # 3. Скачиваем Android NDK (нужен для линковки бинарника)
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+
+      # 4. Устанавливаем утилиту cargo-ndk
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      # 5. Собираем проект (Release версия)
+      - name: Build keymint binary
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cargo ndk -t arm64-v8a build --release
+
+      # 6. Загружаем готовый бинарник, чтобы ты мог его скачать
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: keymint-binary-arm64-v8a
+          # Проверь, что путь к бинарнику совпадает со структурой проекта.
+          # Если главный Cargo.toml лежит в корне, путь будет таким:
+          path: target/aarch64-linux-android/release/keymint
