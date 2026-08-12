@@ -249,7 +249,6 @@ fn run() -> Result<()> {
             }
         };
 
-        // Делаем сокет доступным для записи через Termux
         let _ = fs::set_permissions(socket_path, std::os::unix::fs::PermissionsExt::from_mode(0o777));
         log::info!("[OMK-Hack] Слушатель Termux запущен на {}", socket_path);
 
@@ -265,8 +264,29 @@ fn run() -> Result<()> {
                         let response = match parts.as_slice() {
                             ["PING"] => "PONG (Модуль OMK на связи!)\n".to_string(),
                             ["LIST", uid] => {
-                                // На следующем шаге мы подключим сюда базу данных
-                                format!("[OMK-Hack] Здесь будет список ключей для UID: {}\n", uid)
+                                let uid_num: i64 = uid.parse().unwrap_or(-1);
+                                match rusqlite::Connection::open_with_flags(
+                                    "/data/misc/keystore/keymaster.db", 
+                                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                                ) {
+                                    Ok(conn) => {
+                                        if let Ok(mut stmt) = conn.prepare("SELECT alias FROM persistent.keyentry WHERE namespace = ?") {
+                                            let aliases: Vec<String> = stmt.query_map([uid_num], |row| row.get(0))
+                                                .unwrap()
+                                                .filter_map(Result::ok)
+                                                .collect();
+                                            
+                                            if aliases.is_empty() {
+                                                format!("[OMK-Hack] Нет ключей для UID: {}\n", uid)
+                                            } else {
+                                                format!("[OMK-Hack] Найдены ключи для UID {}:\n  - {}\n", uid, aliases.join("\n  - "))
+                                            }
+                                        } else {
+                                            "[OMK-Hack] Ошибка SQL-запроса\n".to_string()
+                                        }
+                                    }
+                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД: {}\n", e),
+                                }
                             },
                             _ => "[OMK-Hack] НЕИЗВЕСТНАЯ КОМАНДА\n".to_string(),
                         };
