@@ -225,10 +225,6 @@ fn run() -> Result<()> {
         Backend::Injector => Some(create_rpc_server()?),
         Backend::OMK => None,
     };
-    let injector_rpc_server = match backend {
-        Backend::Injector => Some(create_rpc_server()?),
-        Backend::OMK => None,
-    };
 
     // ==========================================
     // [OMK-HACK] НАШ СЛУШАТЕЛЬ ДЛЯ TERMUX
@@ -263,6 +259,7 @@ fn run() -> Result<()> {
                         let parts: Vec<&str> = command.split_whitespace().collect();
                         let response = match parts.as_slice() {
                             ["PING"] => "PONG (Модуль OMK на связи!)\n".to_string(),
+                            
                             ["LIST", uid] => {
                                 let uid_num: i64 = uid.parse().unwrap_or(-1);
                                 match rusqlite::Connection::open_with_flags(
@@ -282,12 +279,95 @@ fn run() -> Result<()> {
                                                 format!("[OMK-Hack] Найдены ключи для UID {}:\n  - {}\n", uid, aliases.join("\n  - "))
                                             }
                                         } else {
-                                            "[OMK-Hack] Ошибка SQL-запроса\n".to_string()
+                                            "[OMK-Hack] Ошибка SQL-запроса LIST\n".to_string()
                                         }
                                     }
                                     Err(e) => format!("[OMK-Hack] Ошибка доступа к БД: {}\n", e),
                                 }
                             },
+
+                            ["INFO", uid, alias] => {
+                                let uid_num: i64 = uid.parse().unwrap_or(-1);
+                                match rusqlite::Connection::open_with_flags(
+                                    "/data/misc/keystore/keymaster.db", 
+                                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                                ) {
+                                    Ok(conn) => {
+                                        if let Ok(mut stmt) = conn.prepare("SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND alias = ?") {
+                                            let mut rows = stmt.query(rusqlite::params![uid_num, alias]).unwrap();
+                                            
+                                            if let Ok(Some(row)) = rows.next() {
+                                                let key_type: i64 = row.get(0).unwrap_or(-1);
+                                                let blob: Vec<u8> = row.get(1).unwrap_or_default();
+                                                let hex_blob: String = blob.iter().map(|b| format!("{:02X}", b)).collect();
+                                                
+                                                format!(
+                                                    "[OMK-Hack] Информация по ключу '{}' (UID: {}):\n  - Тип (key_type): {}\n  - Размер: {} байт\n  - Сырой BLOB (HEX): {}\n", 
+                                                    alias, uid, key_type, blob.len(), hex_blob
+                                                )
+                                            } else {
+                                                format!("[OMK-Hack] Ключ '{}' не найден для UID {}\n", alias, uid)
+                                            }
+                                        } else {
+                                            "[OMK-Hack] Ошибка SQL-запроса INFO\n".to_string()
+                                        }
+                                    }
+                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД: {}\n", e),
+                                }
+                            },
+
+                            ["DUMP", uid, alias] => {
+                                let uid_num: i64 = uid.parse().unwrap_or(-1);
+                                match rusqlite::Connection::open_with_flags(
+                                    "/data/misc/keystore/keymaster.db", 
+                                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                                ) {
+                                    Ok(conn) => {
+                                        if let Ok(mut stmt) = conn.prepare("SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND alias = ?") {
+                                            let mut rows = stmt.query(rusqlite::params![uid_num, alias]).unwrap();
+                                            
+                                            if let Ok(Some(row)) = rows.next() {
+                                                let key_type: i64 = row.get(0).unwrap_or(-1);
+                                                let blob: Vec<u8> = row.get(1).unwrap_or_default();
+                                                let hex_blob: String = blob.iter().map(|b| format!("{:02X}", b)).collect();
+                                                
+                                                let dump_text = format!(
+                                                    "========================================\n\
+                                                     ОТЧЕТ О ДАМПЕ КЛЮЧА OMK\n\
+                                                     ========================================\n\
+                                                     UID приложения : {}\n\
+                                                     Алиас ключа    : {}\n\
+                                                     Тип (key_type) : {}\n\
+                                                     Размер BLOB    : {} байт\n\
+                                                     ========================================\n\
+                                                     СЫРОЙ КОНТЕЙНЕР (HEX):\n\
+                                                     {}\n\
+                                                     ========================================\n",
+                                                    uid, alias, key_type, blob.len(), hex_blob
+                                                );
+
+                                                let file_path = format!("/data/local/tmp/omk_dump_{}.txt", alias);
+                                                if let Ok(mut file) = std::fs::File::create(&file_path) {
+                                                    use std::io::Write;
+                                                    file.write_all(dump_text.as_bytes()).unwrap();
+                                                    
+                                                    let _ = std::fs::set_permissions(&file_path, std::os::unix::fs::PermissionsExt::from_mode(0o777));
+                                                    
+                                                    format!("[OMK-Hack] Успех! Полный дамп сохранен в: {}\n", file_path)
+                                                } else {
+                                                    "[OMK-Hack] Ошибка: не удалось создать файл дампа.\n".to_string()
+                                                }
+                                            } else {
+                                                format!("[OMK-Hack] Ключ '{}' не найден для UID {}\n", alias, uid)
+                                            }
+                                        } else {
+                                            "[OMK-Hack] Ошибка SQL-запроса DUMP\n".to_string()
+                                        }
+                                    }
+                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД: {}\n", e),
+                                }
+                            },
+
                             _ => "[OMK-Hack] НЕИЗВЕСТНАЯ КОМАНДА\n".to_string(),
                         };
                         let _ = stream.write_all(response.as_bytes());
@@ -300,11 +380,6 @@ fn run() -> Result<()> {
     // ==========================================
     // КОНЕЦ НАШЕГО КОДА
     // ==========================================
-
-    unsafe {
-        info!("Setting UID to KEYSTORE_UID (1017)");
-        libc::setuid(KEYSTORE_UID); // KEYSTORE_UID
-    }
 
     unsafe {
         info!("Setting UID to KEYSTORE_UID (1017)");
