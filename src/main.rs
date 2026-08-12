@@ -225,6 +225,66 @@ fn run() -> Result<()> {
         Backend::Injector => Some(create_rpc_server()?),
         Backend::OMK => None,
     };
+    let injector_rpc_server = match backend {
+        Backend::Injector => Some(create_rpc_server()?),
+        Backend::OMK => None,
+    };
+
+    // ==========================================
+    // [OMK-HACK] НАШ СЛУШАТЕЛЬ ДЛЯ TERMUX
+    // ==========================================
+    std::thread::spawn(|| {
+        use std::os::unix::net::UnixListener;
+        use std::io::{Read, Write};
+        use std::fs;
+
+        let socket_path = "/data/adb/omk/termux.sock";
+        let _ = fs::remove_file(socket_path);
+
+        let listener = match UnixListener::bind(socket_path) {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[OMK-Hack] Ошибка создания сокета: {}", e);
+                return;
+            }
+        };
+
+        // Делаем сокет доступным для записи через Termux
+        let _ = fs::set_permissions(socket_path, std::os::unix::fs::PermissionsExt::from_mode(0o777));
+        log::info!("[OMK-Hack] Слушатель Termux запущен на {}", socket_path);
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    let mut buffer = [0; 1024];
+                    if let Ok(size) = stream.read(&mut buffer) {
+                        let command = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                        log::info!("[OMK-Hack] Команда от Termux: {}", command);
+
+                        let parts: Vec<&str> = command.split_whitespace().collect();
+                        let response = match parts.as_slice() {
+                            ["PING"] => "PONG (Модуль OMK на связи!)\n".to_string(),
+                            ["LIST", uid] => {
+                                // На следующем шаге мы подключим сюда базу данных
+                                format!("[OMK-Hack] Здесь будет список ключей для UID: {}\n", uid)
+                            },
+                            _ => "[OMK-Hack] НЕИЗВЕСТНАЯ КОМАНДА\n".to_string(),
+                        };
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                }
+                Err(e) => log::error!("[OMK-Hack] Ошибка потока: {}", e),
+            }
+        }
+    });
+    // ==========================================
+    // КОНЕЦ НАШЕГО КОДА
+    // ==========================================
+
+    unsafe {
+        info!("Setting UID to KEYSTORE_UID (1017)");
+        libc::setuid(KEYSTORE_UID); // KEYSTORE_UID
+    }
 
     unsafe {
         info!("Setting UID to KEYSTORE_UID (1017)");
