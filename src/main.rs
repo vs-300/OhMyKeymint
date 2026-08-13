@@ -226,7 +226,40 @@ fn run() -> Result<()> {
         Backend::OMK => None,
     };
 
-    let response = match parts.as_slice() {
+    // ==========================================
+    // [OMK-HACK] НАШ СЛУШАТЕЛЬ ДЛЯ TERMUX (ИСПРАВЛЕННЫЙ)
+    // ==========================================
+    std::thread::spawn(|| {
+        use std::os::unix::net::UnixListener;
+        use std::io::{Read, Write}; // <-- Импорт для работы write_all (Исправляет E0599)
+        use std::fs;
+
+        let socket_path = "/data/adb/omk/termux.sock";
+        let _ = fs::remove_file(socket_path);
+
+        let listener = match UnixListener::bind(socket_path) {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[OMK-Hack] Ошибка создания сокета: {}", e);
+                return;
+            }
+        };
+
+        let _ = fs::set_permissions(socket_path, std::os::unix::fs::PermissionsExt::from_mode(0o777));
+        log::info!("[OMK-Hack] Слушатель Termux запущен на {}", socket_path);
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    let mut buffer = [0; 1024];
+                    if let Ok(size) = stream.read(&mut buffer) {
+                        let command = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
+                        log::info!("[OMK-Hack] Команда от Termux: {}", command);
+
+                        // <-- Разбиваем команду на слова (Исправляет E0425)
+                        let parts: Vec<&str> = command.split_whitespace().collect();
+
+                        let response = match parts.as_slice() {
                             ["PING"] => "PONG (Модуль OMK на связи!)\n".to_string(),
                             
                             ["LIST", uid] => {
@@ -235,12 +268,10 @@ fn run() -> Result<()> {
                                 
                                 match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        // Запрашиваем и ID, и alias.
                                         if let Ok(mut stmt) = conn.prepare("SELECT id, alias FROM keyentry WHERE namespace = ?").or_else(|_| conn.prepare("SELECT id, alias FROM persistent.keyentry WHERE namespace = ?")) {
                                             if let Ok(mapped) = stmt.query_map([uid_num], |row| {
                                                 let id: i64 = row.get(0)?;
                                                 let alias: Option<String> = row.get(1)?;
-                                                // Если алиаса нет (NULL), возвращаем сам ID как строку
                                                 Ok(alias.unwrap_or_else(|| id.to_string()))
                                             }) {
                                                 let aliases: Vec<String> = mapped.filter_map(Result::ok).collect();
@@ -266,7 +297,6 @@ fn run() -> Result<()> {
 
                                 match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        // Ищем либо по точному совпадению алиаса, либо конвертируем ID в текст и сверяем с ним
                                         let query_ks2 = "SELECT k.key_type, b.blob FROM keyentry k JOIN blobentry b ON k.id = b.keyentryid WHERE k.namespace = ? AND (k.alias = ? OR CAST(k.id AS TEXT) = ?) ORDER BY b.subcomponent_type ASC";
                                         let query_ks1 = "SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND (alias = ? OR CAST(id AS TEXT) = ?)";
                                         
@@ -384,6 +414,16 @@ fn run() -> Result<()> {
 
                             _ => "[OMK-Hack] НЕИЗВЕСТНАЯ КОМАНДА\n".to_string(),
                         };
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                }
+                Err(e) => log::error!("[OMK-Hack] Ошибка потока: {}", e),
+            }
+        }
+    });
+    // ==========================================
+    // КОНЕЦ НАШЕГО КОДА
+    // ==========================================
 
     unsafe {
         info!("Setting UID to KEYSTORE_UID (1017)");
