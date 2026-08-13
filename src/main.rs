@@ -227,11 +227,11 @@ fn run() -> Result<()> {
     };
 
     // ==========================================
-    // [OMK-HACK] НАШ СЛУШАТЕЛЬ ДЛЯ TERMUX (ИСПРАВЛЕННЫЙ)
+    // [OMK-HACK] НАШ СЛУШАТЕЛЬ ДЛЯ TERMUX (БРОНЕБОЙНЫЙ SQL)
     // ==========================================
     std::thread::spawn(|| {
         use std::os::unix::net::UnixListener;
-        use std::io::{Read, Write}; // <-- Импорт для работы write_all (Исправляет E0599)
+        use std::io::{Read, Write};
         use std::fs;
 
         let socket_path = "/data/adb/omk/termux.sock";
@@ -256,9 +256,7 @@ fn run() -> Result<()> {
                         let command = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
                         log::info!("[OMK-Hack] Команда от Termux: {}", command);
 
-                        // <-- Разбиваем команду на слова (Исправляет E0425)
                         let parts: Vec<&str> = command.split_whitespace().collect();
-
                         let response = match parts.as_slice() {
                             ["PING"] => "PONG (Модуль OMK на связи!)\n".to_string(),
                             
@@ -268,26 +266,34 @@ fn run() -> Result<()> {
                                 
                                 match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        if let Ok(mut stmt) = conn.prepare("SELECT id, alias FROM keyentry WHERE namespace = ?").or_else(|_| conn.prepare("SELECT id, alias FROM persistent.keyentry WHERE namespace = ?")) {
-                                            if let Ok(mapped) = stmt.query_map([uid_num], |row| {
-                                                let id: i64 = row.get(0)?;
-                                                let alias: Option<String> = row.get(1)?;
-                                                Ok(alias.unwrap_or_else(|| id.to_string()))
-                                            }) {
-                                                let aliases: Vec<String> = mapped.filter_map(Result::ok).collect();
+                                        // Перекладываем CAST и проверку на NULL на плечи самого SQLite
+                                        let q = "SELECT CAST(id AS TEXT), IFNULL(CAST(alias AS TEXT), '') FROM keyentry WHERE namespace = ?";
+                                        let q_fallback = "SELECT CAST(id AS TEXT), IFNULL(CAST(alias AS TEXT), '') FROM persistent.keyentry WHERE namespace = ?";
+                                        
+                                        if let Ok(mut stmt) = conn.prepare(q).or_else(|_| conn.prepare(q_fallback)) {
+                                            if let Ok(mut rows) = stmt.query([uid_num]) {
+                                                let mut aliases = Vec::new();
+                                                while let Ok(Some(row)) = rows.next() {
+                                                    let id: String = row.get(0).unwrap_or_else(|_| "UNKNOWN".to_string());
+                                                    let mut alias: String = row.get(1).unwrap_or_default();
+                                                    if alias.is_empty() {
+                                                        alias = id;
+                                                    }
+                                                    aliases.push(alias);
+                                                }
                                                 if aliases.is_empty() {
                                                     format!("[OMK-Hack] Нет ключей для UID: {}\n", uid)
                                                 } else {
-                                                    format!("[OMK-Hack] Найдены ключи (Алиас или ID) для UID {}:\n  - {}\n", uid, aliases.join("\n  - "))
+                                                    format!("[OMK-Hack] Найдены ключи для UID {}:\n  - {}\n", uid, aliases.join("\n  - "))
                                                 }
                                             } else {
-                                                "[OMK-Hack] Ошибка чтения результатов LIST\n".to_string()
+                                                "[OMK-Hack] Ошибка выполнения запроса LIST\n".to_string()
                                             }
                                         } else {
-                                            "[OMK-Hack] Ошибка SQL-запроса LIST (таблица не найдена)\n".to_string()
+                                            "[OMK-Hack] Ошибка SQL-запроса LIST\n".to_string()
                                         }
                                     }
-                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД ({}): {}\n", db_path, e),
+                                    Err(e) => format!("[OMK-Hack] Ошибка доступа к БД: {}\n", e),
                                 }
                             },
 
@@ -297,18 +303,19 @@ fn run() -> Result<()> {
 
                                 match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        let query_ks2 = "SELECT k.key_type, b.blob FROM keyentry k JOIN blobentry b ON k.id = b.keyentryid WHERE k.namespace = ? AND (k.alias = ? OR CAST(k.id AS TEXT) = ?) ORDER BY b.subcomponent_type ASC";
-                                        let query_ks1 = "SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND (alias = ? OR CAST(id AS TEXT) = ?)";
+                                        // Используем LEFT JOIN, на случай если контейнера blob вообще нет
+                                        let q = "SELECT k.key_type, IFNULL(b.blob, X'') FROM keyentry k LEFT JOIN blobentry b ON k.id = b.keyentryid WHERE k.namespace = ? AND (CAST(k.alias AS TEXT) = ? OR CAST(k.id AS TEXT) = ?) ORDER BY b.subcomponent_type ASC";
+                                        let q_fallback = "SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND (CAST(alias AS TEXT) = ? OR CAST(id AS TEXT) = ?)";
                                         
-                                        if let Ok(mut stmt) = conn.prepare(query_ks2).or_else(|_| conn.prepare(query_ks1)) {
+                                        if let Ok(mut stmt) = conn.prepare(q).or_else(|_| conn.prepare(q_fallback)) {
                                             if let Ok(mut rows) = stmt.query(rusqlite::params![uid_num, alias_or_id, alias_or_id]) {
                                                 if let Ok(Some(row)) = rows.next() {
                                                     let key_type: i64 = row.get(0).unwrap_or(-1);
                                                     let blob: Vec<u8> = row.get(1).unwrap_or_default();
                                                     let hex_blob: String = blob.iter().map(|b| format!("{:02X}", b)).collect();
-                                                    format!("[OMK-Hack] Информация по ключу '{}' (UID: {}):\n  - Тип (key_type): {}\n  - Размер: {} байт\n  - Сырой BLOB (HEX): {}\n", alias_or_id, uid, key_type, blob.len(), hex_blob)
+                                                    format!("[OMK-Hack] Информация по ключу '{}' (UID: {}):\n  - Тип (key_type): {}\n  - Размер BLOB: {} байт\n  - Сырой BLOB: {}\n", alias_or_id, uid, key_type, blob.len(), hex_blob)
                                                 } else {
-                                                    format!("[OMK-Hack] Контейнер для ключа '{}' не найден (UID {})\n", alias_or_id, uid)
+                                                    format!("[OMK-Hack] Ключ '{}' не найден (UID {})\n", alias_or_id, uid)
                                                 }
                                             } else {
                                                 "[OMK-Hack] Ошибка выполнения запроса INFO\n".to_string()
@@ -327,10 +334,10 @@ fn run() -> Result<()> {
 
                                 match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        let query_ks2 = "SELECT k.key_type, b.blob FROM keyentry k JOIN blobentry b ON k.id = b.keyentryid WHERE k.namespace = ? AND (k.alias = ? OR CAST(k.id AS TEXT) = ?) ORDER BY b.subcomponent_type ASC";
-                                        let query_ks1 = "SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND (alias = ? OR CAST(id AS TEXT) = ?)";
+                                        let q = "SELECT k.key_type, IFNULL(b.blob, X'') FROM keyentry k LEFT JOIN blobentry b ON k.id = b.keyentryid WHERE k.namespace = ? AND (CAST(k.alias AS TEXT) = ? OR CAST(k.id AS TEXT) = ?) ORDER BY b.subcomponent_type ASC";
+                                        let q_fallback = "SELECT key_type, blob FROM persistent.keyentry WHERE namespace = ? AND (CAST(alias AS TEXT) = ? OR CAST(id AS TEXT) = ?)";
 
-                                        if let Ok(mut stmt) = conn.prepare(query_ks2).or_else(|_| conn.prepare(query_ks1)) {
+                                        if let Ok(mut stmt) = conn.prepare(q).or_else(|_| conn.prepare(q_fallback)) {
                                             if let Ok(mut rows) = stmt.query(rusqlite::params![uid_num, alias_or_id, alias_or_id]) {
                                                 if let Ok(Some(row)) = rows.next() {
                                                     let key_type: i64 = row.get(0).unwrap_or(-1);
@@ -361,7 +368,7 @@ fn run() -> Result<()> {
                                                         "[OMK-Hack] Ошибка: не удалось создать файл дампа.\n".to_string()
                                                     }
                                                 } else {
-                                                    format!("[OMK-Hack] Контейнер для ключа '{}' не найден (UID {})\n", alias_or_id, uid)
+                                                    format!("[OMK-Hack] Ключ '{}' не найден (UID {})\n", alias_or_id, uid)
                                                 }
                                             } else {
                                                 "[OMK-Hack] Ошибка выполнения запроса DUMP\n".to_string()
@@ -380,10 +387,10 @@ fn run() -> Result<()> {
 
                                 match rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
                                     Ok(conn) => {
-                                        let query_ks2 = "SELECT b.blob FROM keyentry k JOIN blobentry b ON k.id = b.keyentryid WHERE k.namespace = ? AND (k.alias = ? OR CAST(k.id AS TEXT) = ?) ORDER BY b.subcomponent_type ASC";
-                                        let query_ks1 = "SELECT blob FROM persistent.keyentry WHERE namespace = ? AND (alias = ? OR CAST(id AS TEXT) = ?)";
+                                        let q = "SELECT IFNULL(b.blob, X'') FROM keyentry k LEFT JOIN blobentry b ON k.id = b.keyentryid WHERE k.namespace = ? AND (CAST(k.alias AS TEXT) = ? OR CAST(k.id AS TEXT) = ?) ORDER BY b.subcomponent_type ASC";
+                                        let q_fallback = "SELECT blob FROM persistent.keyentry WHERE namespace = ? AND (CAST(alias AS TEXT) = ? OR CAST(id AS TEXT) = ?)";
 
-                                        if let Ok(mut stmt) = conn.prepare(query_ks2).or_else(|_| conn.prepare(query_ks1)) {
+                                        if let Ok(mut stmt) = conn.prepare(q).or_else(|_| conn.prepare(q_fallback)) {
                                             if let Ok(mut rows) = stmt.query(rusqlite::params![uid_num, alias_or_id, alias_or_id]) {
                                                 if let Ok(Some(row)) = rows.next() {
                                                     if let Ok(blob) = row.get::<_, Vec<u8>>(0) {
@@ -399,7 +406,7 @@ fn run() -> Result<()> {
                                                         "[OMK-Hack] Ошибка чтения BLOB-данных из базы.\n".to_string()
                                                     }
                                                 } else {
-                                                    format!("[OMK-Hack] Контейнер для ключа '{}' не найден (UID {})\n", alias_or_id, uid)
+                                                    format!("[OMK-Hack] Ключ '{}' не найден (UID {})\n", alias_or_id, uid)
                                                 }
                                             } else {
                                                 "[OMK-Hack] Ошибка выполнения запроса DECRYPT\n".to_string()
